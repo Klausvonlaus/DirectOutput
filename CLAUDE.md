@@ -138,6 +138,95 @@ used across the framework, not business logic), `GlobalConfiguration/`
 queue, alarm/timer handling), `Frontend/` (the WinForms UI shown via
 `DirectOutputHandler.ShowFrontend()` inside a hosting app).
 
+### TableElement addressing
+
+A `TableElement` is addressed either by **type char + number** (e.g. `S23` =
+Solenoid #23) or by **name** (`NamedElement`, name forced to upper-invariant).
+The type char comes from `TableElementTypeEnum` (`DirectOutput/Table/TableElementTypeEnum.cs`):
+`L`=Lamp, `W`=Switch, `S`=Solenoid, `G`=GIString, `M`=Mech, `N`=GetMech
+(PinMAME/B2S-specific), `E`=EMTable, `D`=LED, `C`=Score, `B`=ScoreDigit,
+`$`=NamedElement. `DirectOutputHandler.UpdateTableElement()` takes the type
+char as a string and parses the first character; `UpdateNamedTableElement()`
+goes straight to the name-based path. Setting `TableElement.Value` fires
+`ValueChanged`, which synchronously calls `AssignedEffects.Trigger(...)` on
+that element's `AssignedEffectList` — this is the exact point where an
+incoming game event turns into effect execution, on whatever thread is
+processing the input queue.
+
+### Toy hierarchy (`Cab/Toys/`)
+
+All toys derive from `ToyBase`/`ToyBaseUpdatable` and implement one of the
+capability interfaces: `ISingleOutputToy` (on/off or analog single output),
+`IRGBAToy`/`IRGBOutputToy` (color output), `IMatrixToy` (2D LED matrix),
+`IAnalogAlphaToy` (analog intensity). Three implementation families sit on
+top of these interfaces:
+- **`Hardware/`** — toys that map directly to physical devices (`Lamp`,
+  `Shaker`, `Motor`, `GearMotor`, `RGBLed`, `LedStrip`), each ultimately
+  writing to one or more `IOutputController` output ports.
+- **`Layer/`** — compositing toys (`RGBAToy`, `AnalogAlphaToy`) that stack
+  multiple named `Layer`s (via `LayerDictionary`/`AlphaMappingTable`) and
+  blend them into a single effective output value — this is how multiple
+  simultaneous effects targeting the same toy combine instead of simply
+  overwriting each other.
+- **`Virtual/`** — toy *groups* (`RGBAToyGroup`, `AnalogAlphaToyGroup`) that
+  fan one logical toy out to multiple underlying toys (e.g. a "playfield
+  GI" virtual toy driving several real lamps together).
+- **`LWEquivalent/`** — adapts non-LedWiz output controllers to look like
+  LedWiz output numbers/behavior, for compatibility with configs written
+  against the LedWiz output model.
+
+### Output controllers (`Cab/Out/`)
+
+Each vendor subfolder implements the controller-side counterpart: a class
+implementing `IOutputController` (handles writing output values to the
+physical device) and, where the hardware is auto-detectable over USB, a
+companion `IAutoConfigOutputController` (e.g. `LedWizAutoConfigurator` in
+`Cab/Out/LW/`) that `Cabinet.AutoConfig()` discovers via reflection
+(`AppDomain.CurrentDomain.GetAssemblies()...Where(IAutoConfigOutputController...)`)
+and instantiates automatically — no explicit registration list to update
+when adding a new auto-detectable controller, just implement the interface.
+
+### Timing subsystems (`Cab/Schedules/`, `Cab/Sequencer/`, `Cab/Overrides/`)
+
+These three are independent mechanisms for driving toy output over time,
+layered on top of the core effect-trigger pipeline:
+- **`Schedules/`** (`ScheduledSetting(s)`, `ScheduledSettingDevice`) — applies
+  settings to devices on a time schedule (e.g. day/night brightness).
+- **`Sequencer/`** (`Sequencer`, `SequentialOutputDevice/Setting(s)`) — plays
+  back ordered/timed sequences of output settings on a device.
+- **`Overrides/`** (`TableOverrideSetting(s)`, `TableOverrideSettingDevice`) —
+  lets a specific table's config override normal effect-driven output for a
+  device (e.g. force a toy off for tables where an effect misbehaves).
+
+### Color model (`General/Color/`)
+
+`RGBColor`/`RGBAColor` (plus `*Named` variants with predefined color
+constants) are the color value types passed through `RGBAFX` effects and
+`IRGBAToy`/`IRGBOutputToy` implementations. `General/Analog/AnalogAlpha.cs`
+is the equivalent single-channel (intensity/alpha) value type used by
+`IAnalogAlphaToy`. `Curve`/`CurveList` (`General/Curve.cs`) define arbitrary
+256-point input→output byte mapping curves (e.g. gamma/sine curves, see
+`Test/Program.cs` for how one is built), used to reshape values anywhere in
+the effect pipeline before they reach an output.
+
+### Logging (`Log.cs`)
+
+Static, thread-safe (lock-guarded) logger writing to `DirectOutput.log` in
+the working/install folder. Messages logged before the log file itself is
+open (e.g. during early config resolution) are buffered in memory and
+flushed once `Log.Init()` succeeds. Besides `Write`/`Warning`/`Error`/`Exception`,
+note:
+- `Log.Once(key, message)` — logs a message only the first time a given key
+  is used in the session; use this instead of `Write` for per-session-stable
+  info that would otherwise spam the log on every call (e.g. install-folder
+  resolution).
+- `Log.Instrumentation(keys, message)` — a debug-logging channel gated by the
+  `<Instrumentation>` key list in the host's `GlobalConfig_*.xml`; messages
+  only appear if their key(s) are enabled there (or `*` is set to enable all).
+  Use this rather than `Log.Debug`/`Log.Write` for high-frequency diagnostic
+  output (e.g. per-output-port triggers) that shouldn't normally bloat the
+  log.
+
 ## Configuration files (`DirectOutput/Config/`)
 
 Ship-with-the-repo samples/templates:
